@@ -130,7 +130,7 @@ micro_wake_word:
   id: mww
   microphone: micro
   models:
-    - model: hey_jarvis
+    - model: hey_jarvis        # mot livré avec ESPHome ; « hey Moli » demande un modèle entraîné
       id: hey_jarvis
   on_wake_word_detected:
     - voice_assistant.start:
@@ -224,6 +224,27 @@ Plutôt que d'inventer, s'inspirer de ce qui tourne déjà :
   bouton unique et double, sourdine matérielle, timers, deux micros ;
 - **M5Stack Tab5** : `esphome/devices.esphome.io`, `M5Stack-Tab5/voice-assistant.yaml` — la
   version la plus courte qui fonctionne.
+
+## Le mot de réveil
+
+Il n'y a **pas de « hey Moli »** dans le firmware, et ce n'est pas un réglage de Moli : le mot est
+détecté **sur l'appareil**, par un petit modèle (microWakeWord) qui tourne hors ligne. ESPHome
+n'en fournit que quelques-uns, entraînés à l'avance — `okay_nabu`, `hey_mycroft`, `hey_jarvis`.
+Le squelette ci-dessus prend `hey_jarvis` parce qu'il existe ; aucun de ces mots ne nomme Moli, et
+cela n'a aucune importance pour lui : il reçoit la phrase prononcée **après** le mot, jamais le
+mot lui-même.
+
+`wake_words` dans `moli.toml` ne peut donc qu'**activer** un mot que le firmware contient déjà
+(voir « Pièges » 5) — il ne peut pas en inventer un.
+
+| Je veux | Comment |
+|---|---|
+| **Le plus simple** | garder un mot du catalogue (`hey_jarvis`, `okay_nabu`, `hey_mycroft`) ; c'est toujours Moli qui répond |
+| **« hey Moli »** | entraîner un modèle microWakeWord (dépôt `kahrendt/microWakeWord`, quelques heures), puis déclarer son JSON dans `models:` — un manifeste de modèle porte un champ `trained_languages`, donc une phrase française est possible |
+| **Sans mot de réveil** | un appui sur le bouton lance la conversation (voir le `binary_sensor` du squelette) |
+
+Un mot entraîné sur une autre langue s'entend moins bien en français : pour une phrase française,
+l'entraîner avec des enregistrements français.
 
 ## La configuration côté Moli
 
