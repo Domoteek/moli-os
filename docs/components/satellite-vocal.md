@@ -1,8 +1,12 @@
 # Le satellite vocal (ESPHome)
 
 Un appareil posé dans une pièce : on dit un mot de réveil, on parle, Moli répond par la voix
-de l'appareil. C'est l'équivalent d'une enceinte connectée, mais **le cerveau est Moli** : pas
-de cloud, pas de pipeline chez quelqu'un d'autre.
+de l'appareil. C'est l'équivalent d'une enceinte connectée, mais **le cerveau est Moli** : le
+dialogue avec le satellite reste sur le réseau local, sans passer par Home Assistant.
+La transcription (STT), le modèle de conversation (LLM) et la synthèse vocale (TTS) utilisent
+par défaut OpenAI. Whisper et Piper peuvent prendre le relais en local pour la transcription
+et la voix, si ces services sont installés et configurés ; ce n'est pas un secours local du
+LLM. Voir les [réglages de l'assistant](moli.md).
 
 Le pilote `esphome` (`crates/moli-esphome`) parle l'**API native d'ESPHome** — TCP 6053,
 chiffrée par Noise — **sans aucune bibliothèque ESPHome** : le transport est écrit depuis la
@@ -11,7 +15,7 @@ reste un appareil ESPHome ordinaire, que l'on construit et met à jour avec ESPH
 
 ## Ce que Moli attend de l'appareil
 
-Quatre composants du firmware, chacun pour une raison précise :
+Cinq composants du firmware, chacun pour une raison précise :
 
 | Composant ESPHome | Ce que Moli en fait | Obligatoire |
 |---|---|---|
@@ -21,9 +25,10 @@ Quatre composants du firmware, chacun pour une raison précise :
 | `event` (`double_press`) | un double appui met fin à la conversation | non |
 | `speaker` + `microphone` | l'audio lui-même (I2S) | **oui** |
 
-Moli ne fait **aucune** détection de mot de réveil et n'envoie aucun son par l'API : il
-**fabrique** la voix et publie un fichier WAV, dont il donne l'adresse à l'appareil, qui va le
-chercher en HTTP.
+Moli ne fait **aucune** détection de mot de réveil et n'envoie pas le son de la réponse par
+l'API native ESPHome : il donne à l'appareil une URL **FLAC**, que celui-ci va chercher en
+HTTP. Avec la synthèse cloud, le son arrive au fil de sa génération ; avec Piper en local,
+la synthèse est terminée avant l'envoi.
 
 ## Le matériel
 
@@ -187,7 +192,7 @@ event:
 ### Ce qu'il ne faut pas retirer
 
 - **`media_source: audio_http`** et sa présence dans `announcement_pipeline.sources` : sans
-  elle, l'appareil ne sait pas aller chercher le WAV de Moli. Une annonce sans source HTTP
+  elle, l'appareil ne sait pas aller chercher le FLAC de Moli. Une annonce sans source HTTP
   échoue silencieusement côté appareil.
 - **`on_client_connected` → `micro_wake_word.start`** : le mot de réveil ne tourne que
   lorsqu'un client est connecté. Sans cette ligne, l'appareil est sourd.
@@ -212,18 +217,18 @@ La ligne Docker ci-dessus n'est donc pas une seconde installation : c'est le mê
 local, pour **valider un YAML hors ligne** (`esphome config`, ce qui a servi à écrire cette
 page) ou pour flasher depuis un poste qui n'a pas Home Assistant.
 
-Renseigner `secrets.yaml` (`wifi_ssid`, `wifi_password`, `api_key`) — au moins 32 octets en
-base64 pour la clé, ESPHome la génère autrement.
+Renseigner `secrets.yaml` (`wifi_ssid`, `wifi_password`, `api_key`) — la clé contient exactement
+32 octets encodés en base64.
 
 ### Deux configurations de référence, éprouvées
 
 Plutôt que d'inventer, s'inspirer de ce qui tourne déjà :
 
 - **Home Assistant Voice PE** :
-  `https://github.com/esphome/home-assistant-voice-pe` (`home-assistant-voice.yaml`) — LED,
+  [configuration officielle](https://github.com/esphome/home-assistant-voice-pe) (`home-assistant-voice.yaml`) — LED,
   bouton unique et double, sourdine matérielle, timers, deux micros ;
-- **M5Stack Tab5** : `esphome/devices.esphome.io`, `M5Stack-Tab5/voice-assistant.yaml` — la
-  version la plus courte qui fonctionne.
+- **M5Stack Tab5** : [configuration vocale](https://devices.esphome.io/devices/m5stack-tab5/#voice-assistant)
+  (`M5Stack-Tab5/voice-assistant.yaml`) — à compléter par la configuration matérielle de la page.
 
 ## Le mot de réveil
 
@@ -255,7 +260,7 @@ kind = "esphome"
 
 [driver.options]
 host = "192.168.1.x"                          # l'adresse de l'appareil
-media_base = "http://192.168.1.10:8790"       # l'adresse de Moli VUE PAR L'APPAREIL
+media_base = "http://192.168.1.x:8790"        # remplacer x par l'adresse de Moli vue par l'appareil
 wake_words = ["hey_jarvis"]                   # vide : l'appareil garde les siens
 mac = "aa:bb:cc:dd:ee:ff"                     # optionnel (voir « Pièges »)
 logs = "warn"                                 # none, error, warn, info, debug
@@ -266,7 +271,7 @@ logs = "warn"                                 # none, error, warn, info, debug
 | `host` | — | adresse de l'appareil (obligatoire) |
 | `port` | `6053` | port de l'API native |
 | `media_base` | absent | **sans elle, aucune voix** : l'appareil ne saurait pas où prendre le son |
-| `window_s` | `8` | secondes pendant lesquelles une phrase doit commencer après le mot de réveil |
+| `window_s` | `8` | secondes pour commencer à parler à chaque ouverture du micro, y compris après une réponse |
 | `wake_words` | vide | ids des mots à activer parmi ceux du firmware |
 | `mac` | absent | adresse attendue : garde-fou du provisionnement et recherche d'un appareil qui a changé d'adresse |
 | `logs` | `warn` | le journal de l'appareil, reversé dans celui de Moli |
@@ -302,12 +307,15 @@ C'est une commande comme une autre — **la garde s'applique** (pièce protégé
 3. Moli envoie `RUN_START`, puis `STT_START`, et **écoute**. Il **découpe lui-même** le début et
    la fin de la phrase (VAD, `moli-audio`) : `STT_VAD_START` quand la voix commence,
    `STT_VAD_END` quand elle s'arrête. L'appareil ne décide jamais de la fin.
-4. La phrase part chez Whisper, le texte chez le modèle, la réponse revient.
+4. La phrase est transcrite (cloud par défaut, Whisper local en secours), puis le texte part
+   chez le modèle de conversation et la réponse revient.
 5. `INTENT_END{conversation_id, continue_conversation=1}`, `TTS_START{text}`, puis
-   `TTS_END{url}` — l'URL d'un WAV publié par Moli (`/api/media/<nom aléatoire>`, valable
-   5 minutes).
-6. L'appareil va chercher ce fichier et le joue en **annonce**. À la fin, il envoie
-   `VoiceAssistantAnnounceFinished`.
+   `TTS_END{url}` — une URL FLAC préparée par `brain.announcement_url`
+   (`/api/voice/<id aléatoire>.flac`, disponible pendant **60 secondes**), puis `RUN_END`.
+6. L'appareil ouvre cette URL HTTP et joue la réponse en **annonce** : la synthèse cloud est
+   transmise au fil de sa génération, sans attendre le fichier complet. Le secours Piper
+   produit d'abord un WAV complet, converti en FLAC pour l'annonce. À la fin de la lecture,
+   l'appareil envoie `VoiceAssistantAnnounceFinished`.
 7. Moli attend alors une nouvelle demande pendant `CONTINUE_WAIT` (5 s) : la conversation reste
    ouverte **sans redire le mot de réveil**. Sinon, retour à `idle`.
 8. Pour raccrocher : une phrase de fin (« merci », « c'est tout », « stop », « au revoir »…), un
@@ -315,7 +323,9 @@ C'est une commande comme une autre — **la garde s'applique** (pièce protégé
    est enregistré dans l'historique comme une fausse activation, mais il n'y a pas de second
    essai : la conversation s'arrête). Moli envoie alors
    `INTENT_END{continue_conversation=0}` et **un carillon** qu'il fabrique lui-même
-   (`sound.rs`, aucun fichier sur l'appareil).
+   (`sound.rs`, aucun fichier sur l'appareil). Ce carillon est un média FLAC complet sous
+   `/api/media/<nom aléatoire>.flac`, valable **5 minutes**, distinct des réponses sous
+   `/api/voice/`.
 
 ## ⚠️ Un seul cerveau : Home Assistant **ou** Moli
 
@@ -334,24 +344,25 @@ Multiple API Clients attempting to connect to Voice Assistant
 entrée ESPHome avec les capacités d'assistant vocal, HA **s'abonne systématiquement** dans
 `async_added_to_hass`. Ce n'est pas une option que l'on décoche.
 
-**Conséquence** : si l'appareil est dans Home Assistant, **c'est HA qui tient l'assistant
-vocal**, et Moli est refusé. Moli ne peut pas s'en apercevoir — `subscribe_voice_assistant` est
-un message sans réponse ; il verra l'appareil, ses points, son état `idle`, et **ne parlera
-jamais**.
+**Conséquence** : si HA et Moli gèrent le même appareil, **le premier client abonné tient
+l'assistant vocal**, et le second est refusé. Si HA s'est abonné en premier, Moli verra
+l'appareil, ses points et son état `idle`, mais ne recevra aucune demande de conversation.
+`subscribe_voice_assistant` est un message sans réponse : Moli ne reçoit pas de confirmation
+du refus.
 
 Deux issues, à choisir :
 
 | Je veux | Alors |
 |---|---|
 | **Moli comme cerveau** | ne pas laisser HA gérer l'appareil : refuser la découverte, ou supprimer/ignorer l'entrée ESPHome de cet appareil dans HA. Le **Device Builder continue de le flasher en OTA** (il parle à l'appareil directement), seules les entités disparaissent de HA |
-| **HA comme cerveau** | Moli peut rester déclaré : il lira le volume, la sourdine et l'état, mais ne conduira aucune conversation |
+| **HA comme cerveau** | désactiver ce pilote dans Moli pour éviter qu'il s'abonne en premier ; le pilote ne propose pas de mode lecture seule sans abonnement vocal |
 
 Vérification, côté appareil : le journal ESPHome doit **cesser** d'afficher
 `Multiple API Clients…` une fois HA retiré.
 
 ## Pièges
 
-1. **`media_base` doit être l'adresse que l'appareil joint.** L'appareil va chercher le WAV
+1. **`media_base` doit être l'adresse que l'appareil joint.** L'appareil va chercher le FLAC
    lui-même : `127.0.0.1` ne peut pas marcher, et un nom d'hôte résolu seulement par le PC non
    plus. Sans `media_base`, une demande de conversation est refusée et l'état reste `idle`
    (journal : `voice request: no assistant or no media_base`).
@@ -386,7 +397,7 @@ Vérification, côté appareil : le journal ESPHome doit **cesser** d'afficher
 | `GET /api/health` | le pilote `esphome` en `running` |
 | `GET /api/devices` | un appareil `salon:<mac>`, en ligne, avec les cinq points |
 | Dire le mot de réveil | `state` passe à `listening`, puis `thinking`, puis `speaking` |
-| Écrire sur `say` | l'appareil dit la phrase, puis revient à `idle` |
+| Écrire sur `say` | l'appareil dit la phrase en annonce ; `state` suit la conversation, pas cette commande |
 | Journal de Moli | `esphome device connected`, puis `satellite listened` avec les niveaux, puis `satellite turn` avec les durées |
 
 ## Ce que Moli ne fait pas (encore)
@@ -394,8 +405,9 @@ Vérification, côté appareil : le journal ESPHome doit **cesser** d'afficher
 - **Les minuteurs** de l'assistant (`on_timer_*` d'ESPHome) : Moli ne les envoie pas.
 - **Le son par UDP** (ancien mode) : Moli impose `port: 0`, donc l'API.
 - **Le multi-micro** du Voice PE (deux canaux) : Moli lit le premier canal.
-- **Le streaming de la voix** : la réponse est un WAV complet, publié puis joué. Un premier mot
-  plus rapide demanderait `INTENT_PROGRESS` avec `tts_start_streaming`, comme HA le fait.
+- **`INTENT_PROGRESS` avec `tts_start_streaming`** : ce mécanisme du protocole ESPHome n'est
+  pas implémenté. Moli attend le texte complet de la réponse avant `TTS_END`, mais le son
+  cloud est déjà transmis en **streaming HTTP** par l'URL `/api/voice/`.
 
 ## Voir aussi
 
